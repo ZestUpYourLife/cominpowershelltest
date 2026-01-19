@@ -1,0 +1,100 @@
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory=$true, HelpMessage="Der Name des Azure Storage Accounts.")]
+    [string]$StorageAccountName,
+
+    [Parameter(Mandatory=$true, HelpMessage="Der Name des Blob-Containers.")]
+    [string]$ContainerName,
+
+    [Parameter(Mandatory=$true, HelpMessage="Der Name der ZIP-Datei im Storage.")]
+    [string]$BlobName,
+
+    # Optional: Pfade ebenfalls als Parameter (mit Standardwerten)
+    [string]$WorkDir = "C:\Temp",
+    [string]$InstallDir = "C:\ProgramData"
+)
+
+# ---------------------------------------------------------------------------
+# Konfiguration (Interne Pfade)
+# ---------------------------------------------------------------------------
+$LogFile = Join-Path -Path $WorkDir -ChildPath "ImageBuild.log"
+$ErrorActionPreference = "Stop"
+
+# ---------------------------------------------------------------------------
+# Hilfsfunktion für Logging
+# ---------------------------------------------------------------------------
+function Write-Log {
+    param (
+        [string]$Message,
+        [string]$Type = "INFO"
+    )
+    
+    if (!(Test-Path (Split-Path $LogFile))) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $LogFile) | Out-Null
+    }
+
+    $TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogLine   = "[$TimeStamp] [$Type] $Message"
+
+    if ($Type -eq "ERROR") {
+        Write-Error $LogLine
+    } else {
+        Write-Host $LogLine
+    }
+
+    Add-Content -Path $LogFile -Value $LogLine -Force
+}
+
+# ---------------------------------------------------------------------------
+# Hauptlogik
+# ---------------------------------------------------------------------------
+try {
+    # 1. Arbeitsverzeichnisse erstellen
+    Write-Log "Erstelle Verzeichnisse..."
+    if (!(Test-Path $WorkDir)) { New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null }
+    if (!(Test-Path $InstallDir)) { New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null }
+
+    # 2. Module prüfen und installieren
+    if (!(Get-Module -ListAvailable -Name Az.Storage)) {
+        Write-Log "Modul Az.Storage nicht gefunden. Installiere..."
+        Install-Module -Name Az.Storage -Repository PSGallery -Force -AllowClobber -Scope AllUsers
+    }
+    
+    # 3. Authentifizierung via Managed Identity
+    Write-Log "Verbinde mit Managed Identity..."
+    Connect-AzAccount -Identity | Out-Null
+    
+    # Kontext erstellen
+    $Ctx = New-AzStorageContext -StorageAccountName $StorageAccountName -UseConnectedAccount
+
+    # 4. Download der ZIP-Datei
+    $LocalZipPath = Join-Path -Path $WorkDir -ChildPath $BlobName
+    Write-Log "Starte Download von '$BlobName' nach '$LocalZipPath'..."
+    
+    Get-AzStorageBlobContent -Container $ContainerName `
+                             -Blob $BlobName `
+                             -Destination $WorkDir `
+                             -Context $Ctx `
+                             -Force | Out-Null
+    
+    if (!(Test-Path $LocalZipPath)) {
+        throw "Die Datei wurde nicht heruntergeladen."
+    }
+    Write-Log "Download erfolgreich."
+
+    # 5. Entpacken der Datei
+    Write-Log "Entpacke ZIP nach '$InstallDir'..."
+    Expand-Archive -Path $LocalZipPath -DestinationPath $InstallDir -Force
+    Write-Log "Entpacken abgeschlossen."
+
+    # 6. Aufräumen (Clean Up)
+    Write-Log "Lösche temporäre ZIP-Datei..."
+    Remove-Item -Path $LocalZipPath -Force
+    
+    Write-Log "Skript erfolgreich beendet." "SUCCESS"
+}
+catch {
+    $ErrorMessage = $_.Exception.Message
+    Write-Log "Ein Fehler ist aufgetreten: $ErrorMessage" "ERROR"
+    exit 1
+}
